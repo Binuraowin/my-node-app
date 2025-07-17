@@ -1,4 +1,4 @@
-name: CI/CD to EC2
+name: CI/CD to EC2 with Debug
 on:
   push:
     branches: [ main ]
@@ -7,9 +7,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+    
+    # Debug: Check secrets are available
+    - name: Debug - Check Secrets
+      run: |
+        echo "REMOTE_HOST exists: ${{ secrets.REMOTE_HOST != '' }}"
+        echo "REMOTE_USER exists: ${{ secrets.REMOTE_USER != '' }}"
+        echo "SSH_PRIVATE_KEY exists: ${{ secrets.SSH_PRIVATE_KEY != '' }}"
+        echo "SSH_PRIVATE_KEY length: $(echo '${{ secrets.SSH_PRIVATE_KEY }}' | wc -c)"
+        echo "SSH_PRIVATE_KEY first line: $(echo '${{ secrets.SSH_PRIVATE_KEY }}' | head -n1)"
+        echo "SSH_PRIVATE_KEY last line: $(echo '${{ secrets.SSH_PRIVATE_KEY }}' | tail -n1)"
+    
+    # Debug: Test SSH key format
+    - name: Debug - Test SSH Key Format
+      run: |
+        echo "Creating temp SSH key file..."
+        mkdir -p ~/.ssh
+        echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/debug_key
+        chmod 600 ~/.ssh/debug_key
+        echo "SSH key file created, testing format..."
+        ssh-keygen -y -f ~/.ssh/debug_key || echo "SSH key format is invalid!"
+        rm ~/.ssh/debug_key
+    
+    # Debug: Test basic connectivity
+    - name: Debug - Test Basic Connectivity
+      run: |
+        echo "Testing basic connectivity to ${{ secrets.REMOTE_HOST }}..."
+        ping -c 3 ${{ secrets.REMOTE_HOST }} || echo "Ping failed"
+        nc -zv ${{ secrets.REMOTE_HOST }} 22 || echo "Port 22 not accessible"
+    
     - name: Build Docker Image
       run: docker build -t my-node-app .
-    - name: Copy to EC2
+    
+    # Enhanced SCP with debug
+    - name: Copy to EC2 (with debug)
       uses: appleboy/scp-action@master
       with:
         host: ${{ secrets.REMOTE_HOST }}
@@ -17,15 +48,67 @@ jobs:
         key: ${{ secrets.SSH_PRIVATE_KEY }}
         source: "./"
         target: "/home/ec2-user/my-node-app"
-    - name: Deploy to EC2
+        debug: true
+        verbose: true
+        timeout: 60s
+        command_timeout: 30s
+    
+    # Debug: Verify files were copied
+    - name: Debug - Verify File Copy
       uses: appleboy/ssh-action@master
       with:
         host: ${{ secrets.REMOTE_HOST }}
         username: ${{ secrets.REMOTE_USER }}
         key: ${{ secrets.SSH_PRIVATE_KEY }}
+        debug: true
         script: |
+          echo "=== Debug Info ==="
+          echo "Current user: $(whoami)"
+          echo "Current directory: $(pwd)"
+          echo "Home directory contents:"
+          ls -la ~/
+          echo "my-node-app directory:"
+          ls -la ~/my-node-app/ || echo "my-node-app directory not found"
+          echo "SSH key info:"
+          ls -la ~/.ssh/
+          echo "Authorized keys:"
+          cat ~/.ssh/authorized_keys
+          echo "Docker info:"
+          docker --version || echo "Docker not installed"
+          docker ps || echo "Cannot list docker containers"
+    
+    # Enhanced deployment with debug
+    - name: Deploy to EC2 (with debug)
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.REMOTE_HOST }}
+        username: ${{ secrets.REMOTE_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        debug: true
+        script: |
+          set -e
+          echo "=== Starting Deployment ==="
+          echo "Current directory: $(pwd)"
+          echo "Changing to app directory..."
           cd /home/ec2-user/my-node-app
-          docker build -t my-node-app .
-          docker stop my-node-app || true
-          docker rm my-node-app || true
-          docker run -d --name my-node-app -p 8000:8000 my-node-app
+          echo "App directory contents:"
+          ls -la
+          
+          echo "=== Building Docker Image ==="
+          docker build -t my-node-app . || { echo "Docker build failed"; exit 1; }
+          
+          echo "=== Stopping existing container ==="
+          docker stop my-node-app || echo "No existing container to stop"
+          
+          echo "=== Removing existing container ==="
+          docker rm my-node-app || echo "No existing container to remove"
+          
+          echo "=== Starting new container ==="
+          docker run -d --name my-node-app -p 8000:8000 my-node-app || { echo "Failed to start container"; exit 1; }
+          
+          echo "=== Verifying deployment ==="
+          sleep 5
+          docker ps | grep my-node-app || echo "Container not running!"
+          curl -f http://localhost:8000 || echo "App not responding on port 8000"
+          
+          echo "=== Deployment Complete ==="
